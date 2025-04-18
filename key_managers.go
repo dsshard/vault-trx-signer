@@ -28,6 +28,7 @@ func paths(b *Backend) []*framework.Path {
 		pathReadAndDelete(b),
 		pathSign(b),
 		pathTransferTx(b),
+        pathTRC20Transfer(b),  // ← в конец массива
 	}
 }
 

@@ -10,6 +10,7 @@ import (
     core "github.com/fbsobreira/gotron-sdk/pkg/proto/core"
     "github.com/hashicorp/vault/sdk/logical"
     "github.com/stretchr/testify/assert"
+    "google.golang.org/protobuf/types/known/anypb"
     "google.golang.org/protobuf/proto"
 )
 
@@ -142,5 +143,69 @@ func TestTransferTx(t *testing.T) {
     assert.Len(t, tx.Signature, 1)
     txID := resp.Data["tx_id"].(string)
     _, err = hex.DecodeString(txID)
+    assert.NoError(t, err)
+}
+
+func TestTransferTRC20(t *testing.T) {
+    b, storage := newTestBackend(t)
+
+    // Создаём key‐manager
+    req := logical.TestRequest(t, logical.UpdateOperation, "key-managers")
+    req.Storage = storage
+    req.Data = map[string]interface{}{"serviceName": "svc"}
+    _, err := b.HandleRequest(context.Background(), req)
+    assert.NoError(t, err)
+
+    // Читаем только что созданный адрес
+    req = logical.TestRequest(t, logical.ReadOperation, "key-managers/svc")
+    req.Storage = storage
+    resp, err := b.HandleRequest(context.Background(), req)
+    assert.NoError(t, err)
+    addrs := resp.Data["addresses"].([]string)
+    assert.Len(t, addrs, 1)
+    owner := addrs[0]
+
+    // Формируем запрос на TRC‑20‑transfer
+    req = logical.TestRequest(t, logical.CreateOperation, "key-managers/svc/txn/trc20/transfer")
+    req.Storage = storage
+    req.Data = map[string]interface{}{
+        "name":     "svc",
+        "contract": owner,       // в тесте используем свой же адрес как "контракт"
+        "to":       owner,       // отправляем себе
+        "amount":   "1234",
+        "feeLimit": 2000000,
+    }
+    resp, err = b.HandleRequest(context.Background(), req)
+    assert.NoError(t, err)
+
+    // Распаковываем signed_tx
+    b64 := resp.Data["signed_tx"].(string)
+    bin, err := base64.StdEncoding.DecodeString(b64)
+    assert.NoError(t, err)
+
+    // Unmarshal в core.Transaction
+    tx := &core.Transaction{}
+    assert.NoError(t, proto.Unmarshal(bin, tx))
+
+    // У нас должен быть ровно один контракт TriggerSmartContract
+    assert.Len(t, tx.RawData.Contract, 1)
+    c := tx.RawData.Contract[0]
+    assert.Equal(t, core.Transaction_Contract_TriggerSmartContract, c.Type)
+
+    // Проверяем, что Parameter — корректный TriggerSmartContract
+    p := &core.TriggerSmartContract{}
+    assert.NoError(t, anypb.UnmarshalTo(c.Parameter, p, proto.UnmarshalOptions{}))
+    // owner и contract адреса хранятся в байтах Base58Check
+    assert.Equal(t, decodeBase58(owner), p.OwnerAddress)
+    assert.Equal(t, decodeBase58(owner), p.ContractAddress)
+    assert.Equal(t, int64(0), p.CallValue)
+    // feeLimit проверим из RawData
+    assert.Equal(t, int64(2000000), tx.RawData.FeeLimit)
+
+    // Должна быть ровно одна подпись
+    assert.Len(t, tx.Signature, 1)
+    // И tx_id — это корректный hex SHA256(rawData)
+    idHex := resp.Data["tx_id"].(string)
+    _, err = hex.DecodeString(idHex)
     assert.NoError(t, err)
 }
